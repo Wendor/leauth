@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>leauth — состояние доменов</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  code { font-size: 13px; word-break: break-all; }
+  .pending_cname { color: #a60; }
+  .active { color: #060; }
+  .error { color: #a00; }
+  .issuing { color: #06a; }
+  .idle { color: #888; }
+  /* Пары идут по две в ряд: заголовков немного, но по одному в строку
+     они съедали заметную часть высоты до таблицы. */
+  .auth { display: grid; gap: .1rem .8rem;
+          grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+          margin: 0 0 2rem; padding: 0 0 1rem; border-bottom: 1px solid #ddd;
+          font-size: 13px; }
+  .auth dt { color: #888; }
+  .auth dd { margin: 0; min-width: 0; }
+  @media (max-width: 900px) {
+    .auth { grid-template-columns: max-content minmax(0, 1fr); }
+  }
+</style>
+{{with .Auth}}
+<dl class="auth">
+  {{range .}}<dt>{{.Name}}</dt><dd><code>{{.Value}}</code></dd>{{end}}
+</dl>
+{{end}}
+<h1>Состояние доменов</h1>
+<table>
+  <tr>
+    <th>Домен</th><th>Статус</th><th>Прокси</th><th>CNAME для зоны</th>
+    <th>Действует до</th><th>Serial</th><th>Последняя ошибка</th>
+  </tr>
+  {{range .Domains}}
+  <tr>
+    <td>{{.Name}}{{if .Wildcard}} <em>+ wildcard</em>{{end}}</td>
+    <td class="{{.Status}}">{{.Status}}</td>
+    <td>{{if .Clients}}{{range .Clients}}{{.}}<br>{{end}}{{else}}<em class="idle">не обслуживается</em>{{end}}</td>
+    <td><code>{{.CNAMEName}}</code> →<br><code>{{.CNAMETarget}}</code></td>
+    <td>{{if .NotAfter}}{{.NotAfter}}{{else}}—{{end}}</td>
+    <td>{{if .Serial}}<code>{{.Serial}}</code>{{else}}—{{end}}</td>
+    <td>{{if .LastError}}{{.LastError}}{{else}}—{{end}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="7">Доменов пока нет.</td></tr>
+  {{end}}
+</table>
+<p>Обновлено: {{.Now}}</p>

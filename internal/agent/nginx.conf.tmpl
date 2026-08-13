@@ -1,0 +1,227 @@
+# Файл создан leauth agent. Правки будут перезаписаны.
+worker_processes auto;
+error_log /dev/stderr warn;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    access_log    /dev/stdout;
+
+    sendfile      on;
+    server_tokens off;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    map $http_upgrade $http_connection {
+        default upgrade;
+        ''      close;
+    }
+{{range .Endpoints}}{{if .UpstreamAuthHeader}}
+    # Реквизиты бэкенда подставляются, только когда клиент не прислал
+    # своих: под тем же адресом может жить машинный интерфейс со своими
+    # токенами, и затирать их нельзя.
+    map $http_authorization {{.AuthVar}} {
+        ''      "{{.UpstreamAuthHeader}}";
+        default $http_authorization;
+    }
+{{end}}{{end}}
+
+    # Имя апстрима резолвится на запросе, а не при загрузке конфига:
+    # иначе nginx не поднимется и не переживёт reload, пока хотя бы один
+    # бэкенд недоступен, — а reload у нас идёт при каждом обновлении
+    # сертификата.
+    resolver {{.Resolver}} valid=30s ipv6=off;
+{{range .Defaults}}
+    # Имя, которого нет ни у одного эндпоинта этого порта. Без такого
+    # блока nginx отдал бы запрос первому серверу порта вместе с его
+    # сертификатом.
+    server {
+        listen {{.Port}} ssl default_server;
+        http2 on;
+
+        server_name _;
+
+        ssl_certificate     {{$.CertDir}}/{{.CertName}}/fullchain.pem;
+        ssl_certificate_key {{$.CertDir}}/{{.CertName}}/privkey.pem;
+
+        return 421;
+    }
+{{end}}{{range $e := .Endpoints}}
+    server {
+        listen {{.Listen}} ssl;
+        http2 on;
+
+        server_name {{.Domain}};
+
+        ssl_certificate     {{$.CertDir}}/{{.CertName}}/fullchain.pem;
+        ssl_certificate_key {{$.CertDir}}/{{.CertName}}/privkey.pem;
+{{if .ServePort}}
+        # Служебные адреса oauth2-proxy: вход, callback, выход.
+        #
+        # X-Auth-Request-Redirect возвращает пользователя туда, куда он
+        # шёл. При общем входе адрес полный, вместе с доменом: вернуться
+        # нужно на свой домен, а не на тот, где происходил вход. Адрес
+        # едет заголовком, а не параметром rd, — иначе запрос со своими
+        # «?» и «&» разрезал бы строку запроса.
+        location /oauth2/ {
+            proxy_pass http://127.0.0.1:{{.ServePort}};
+
+            proxy_set_header Host                    $host;
+            proxy_set_header X-Real-IP               $remote_addr;
+            proxy_set_header X-Forwarded-For         $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto       https;
+            # oauth2-proxy доверяет X-Forwarded-* от локального nginx,
+            # поэтому имя хоста задаём мы, а не тот, кто пришёл.
+            proxy_set_header X-Forwarded-Host        $host;
+            proxy_set_header X-Auth-Request-Redirect {{.RedirectHeader}};
+        }
+
+        # Выход. Свой блок нужен из-за адреса возврата: в общем блоке он
+        # указывает на текущий запрос, то есть для выхода — на сам выход.
+        # oauth2-proxy берёт заголовок, когда параметр rd не задан или не
+        # прошёл проверку, и выход тогда возвращает на выход — снаружи
+        # это выглядит как «нажал, и ничего не произошло».
+        location = /oauth2/sign_out {
+            proxy_pass http://127.0.0.1:{{.ServePort}};
+
+            proxy_set_header Host                    $host;
+            proxy_set_header X-Real-IP               $remote_addr;
+            proxy_set_header X-Forwarded-For         $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto       https;
+            # oauth2-proxy доверяет X-Forwarded-* от локального nginx,
+            # поэтому имя хоста задаём мы, а не тот, кто пришёл.
+            proxy_set_header X-Forwarded-Host        $host;
+            proxy_set_header X-Auth-Request-Redirect {{.LogoutRedirect}};
+        }
+{{end}}{{if .OAuthPort}}
+        # Подзапрос проверки сессии: тело запроса для него не нужно.
+        #
+        # Отказ по группам приходит как 403 и до error_page 401 не
+        # доходит: иначе человек без нужной группы уходил бы на повторный
+        # вход по кругу вместо внятного «доступ запрещён».
+        location = /oauth2/auth {
+            internal;
+
+            proxy_pass http://127.0.0.1:{{.OAuthPort}}/oauth2/auth{{.GroupsQuery}};
+
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host  $host;
+            proxy_set_header Content-Length    "";
+
+            proxy_pass_request_body off;
+        }
+{{end}}
+{{if .OAuthPort}}{{range .OAuth.SkipPaths}}
+        # Выведено из-под авторизации: сюда ходят не браузером.
+        location {{.}} {
+{{- template "clearauth"}}
+{{- template "proxy" $e}}        }
+{{end}}{{end}}
+        location / {
+{{- if .OAuthPort}}
+            auth_request /oauth2/auth;
+            error_page 401 = /oauth2/start;
+
+            # Кто пришёл — знает бэкенд. Набор ровно тот, что отдаёт
+            # oauth2-proxy при --set-xauthrequest.
+            auth_request_set $auth_user      $upstream_http_x_auth_request_user;
+            auth_request_set $auth_email     $upstream_http_x_auth_request_email;
+            auth_request_set $auth_groups    $upstream_http_x_auth_request_groups;
+            auth_request_set $auth_preferred $upstream_http_x_auth_request_preferred_username;
+
+            # Присланное клиентом здесь заведомо затирается: значения
+            # берутся из подзапроса проверки сессии, а пустое значение
+            # убирает заголовок совсем.
+            proxy_set_header X-Auth-Request-User               $auth_user;
+            proxy_set_header X-Auth-Request-Email              $auth_email;
+            proxy_set_header X-Auth-Request-Groups             $auth_groups;
+            proxy_set_header X-Auth-Request-Preferred-Username $auth_preferred;
+
+            # Токен доступа прокси не запрашивает (--pass-access-token не
+            # задан), а Redirect — служебный заголовок входа: до бэкенда
+            # ни тот, ни другой доезжать не должны, и прийти сюда они
+            # могут только от клиента.
+            proxy_set_header X-Auth-Request-Access-Token       "";
+            proxy_set_header X-Auth-Request-Redirect           "";
+
+            # Продлённая сессия приходит из подзапроса и иначе до браузера
+            # не доедет. always — иначе ответ бэкенда с ошибкой потерял бы
+            # обновлённую cookie и человека разлогинило бы на ровном месте.
+            auth_request_set $auth_cookie $upstream_http_set_cookie;
+            add_header Set-Cookie $auth_cookie always;
+{{else}}
+{{- template "clearauth"}}
+{{- end}}
+{{- template "proxy" $e}}        }
+    }
+{{end}}}
+{{- define "clearauth"}}
+            # Авторизации на этом пути нет, поэтому заголовки о вошедшем
+            # ставить некому. Пустое значение убирает их из запроса: иначе
+            # клиент прислал бы свой X-Auth-Request-User и бэкенд,
+            # доверяющий этим заголовкам, принял бы его за вошедшего.
+            #
+            # Список полный по префиксу: занулять нужно всё, что бэкенд
+            # мог бы принять за слово прокси, а не только то, что прокси
+            # проставляет сам.
+            proxy_set_header X-Auth-Request-User               "";
+            proxy_set_header X-Auth-Request-Email              "";
+            proxy_set_header X-Auth-Request-Groups             "";
+            proxy_set_header X-Auth-Request-Preferred-Username "";
+            proxy_set_header X-Auth-Request-Access-Token       "";
+            proxy_set_header X-Auth-Request-Redirect           "";
+{{end}}
+{{- define "proxy"}}
+            set $upstream {{.Upstream}};
+            proxy_pass $upstream$request_uri;
+{{if .UpstreamAuthHeader}}
+            proxy_set_header Authorization {{.AuthVar}};
+{{end}}
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host  $host;
+            proxy_set_header X-Forwarded-Port  $server_port;
+
+            # Остальные заголовки о «настоящем» адресе запроса клиент
+            # присылать не должен: по ним приложения строят абсолютные
+            # ссылки, а некоторые фреймворки подменяют по ним путь —
+            # и тогда запрос, пропущенный мимо авторизации по одному
+            # пути, обрабатывается как другой.
+            proxy_set_header X-Forwarded-Prefix "";
+            proxy_set_header X-Forwarded-Uri    "";
+            proxy_set_header X-Forwarded-Server "";
+            proxy_set_header X-Forwarded-Ssl    "";
+            proxy_set_header X-Url-Scheme       "";
+            proxy_set_header X-Original-URL     "";
+            proxy_set_header X-Rewrite-URL      "";
+
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade    $http_upgrade;
+            proxy_set_header Connection $http_connection;
+
+            # Буферизация выключена, потому что за прокси живут не только
+            # обычные страницы: поток server-sent events (например
+            # /api/v1/notifications/live у Prometheus), вывод логов,
+            # длинные выгрузки. Накапливая такой ответ в буфере, nginx не
+            # отдаёт клиенту ничего, и запрос выглядит как зависший до
+            # самого таймаута.
+            proxy_buffering off;
+
+            # Поток может молчать подолгу — дефолтная минута обрывает его
+            # на ровном месте. Обычным запросам этот запас не мешает:
+            # таймаут считается от последнего байта, а не от начала.
+            proxy_read_timeout 1h;
+            proxy_send_timeout 1h;
+{{end}}

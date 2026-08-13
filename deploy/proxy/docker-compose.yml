@@ -1,0 +1,41 @@
+services:
+  leauth-proxy:
+    # image рядом с build — это выбор, а не дубль: docker compose pull
+    # заберёт готовый образ из GHCR, а без него compose соберёт его сам
+    # из исходников рядом. Тег закрепляется в .env: LEAUTH_TAG=vX.Y.Z.
+    image: ghcr.io/wendor/leauth-proxy:${LEAUTH_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/proxy/Dockerfile
+    restart: unless-stopped
+    # Всё из .env уезжает в контейнер целиком: в agent.yaml подставляются
+    # ещё и пароли к бэкендам, а какие они — знает только эта установка.
+    # Без env_file переменную пришлось бы дописывать сюда каждый раз.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LEAUTH_ENROLL_TOKEN: ${LEAUTH_ENROLL_TOKEN:?нужен токен приёма, выдаётся администратором центра}
+      # Нужны, только если у эндпоинтов есть блок oauth.
+      GITLAB_CLIENT_ID: ${GITLAB_CLIENT_ID:-}
+      GITLAB_CLIENT_SECRET: ${GITLAB_CLIENT_SECRET:-}
+      OAUTH_COOKIE_SECRET: ${OAUTH_COOKIE_SECRET:-}
+    volumes:
+      # create_host_path: false — иначе Docker создаст на месте
+      # отсутствующего конфига пустой каталог, и разбираться придётся
+      # с невнятной ошибкой чтения вместо «файла нет».
+      - type: bind
+        source: ./agent.yaml
+        target: /etc/leauth/agent.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - leauth-certs:/etc/leauth/certs
+    ports:
+      # Порт из listen первого эндпоинта. Остальные порты и доступ к
+      # чужим docker-сетям — в docker-compose.override.yml, чтобы правки
+      # под конкретный хост не расходились с репозиторием. Пример рядом.
+      - "${PROXY_PORT:-8443}:${PROXY_PORT:-8443}"
+
+volumes:
+  leauth-certs:

@@ -1,0 +1,35 @@
+[general]
+# Адрес внутри контейнера. Меняется, когда acme-dns переводят в сеть
+# хоста: там 0.0.0.0 столкнётся с systemd-resolved на 127.0.0.53, и
+# нужно указать публичный адрес явно.
+listen = "${ACMEDNS_LISTEN}"
+protocol = "both"
+# Делегированная вам зона: под ней acme-dns выдаёт поддомены доменам.
+domain = "${ACMEDNS_ZONE}"
+# Имя, под которым acme-dns представляется в NS- и SOA-записях.
+nsname = "${ACMEDNS_NS_HOST}"
+# Почта администратора зоны в форме SOA: точка вместо @, а точки внутри
+# имени экранируются. Строка литеральная: в обычной TOML-строке обратный
+# слеш считается началом escape-последовательности и конфиг не парсится.
+nsadmin = '${ACMEDNS_ADMIN}'
+# Самоописание зоны: без этих записей делегирование не замыкается.
+records = [
+    "${ACMEDNS_ZONE}. A ${ACMEDNS_PUBLIC_IP}",
+    "${ACMEDNS_ZONE}. NS ${ACMEDNS_NS_HOST}.",
+    "${ACMEDNS_NS_HOST}. A ${ACMEDNS_PUBLIC_IP}",
+]
+debug = false
+
+[database]
+engine = "sqlite"
+connection = "/var/lib/acme-dns/acme-dns.db"
+
+[api]
+ip = "0.0.0.0"
+port = "8081"
+tls = "none"
+
+[logconfig]
+loglevel = "info"
+logtype = "stdout"
+logformat = "text"

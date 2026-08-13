@@ -1,0 +1,10 @@
+server: http://leauth-server:8080
+name: e2e-proxy
+enroll_token: ${LEAUTH_ENROLL_TOKEN}
+cert_dir: /etc/leauth/certs
+poll_interval: 5s
+
+endpoints:
+  - domain: test.example.com
+    listen: 8443
+    upstream: http://backend:80

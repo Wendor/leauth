@@ -1,0 +1,87 @@
+services:
+  # acme-dns читает только TOML-файл, переменных окружения не понимает.
+  # Этот шаг подставляет параметры служебной зоны в шаблон и завершается.
+  acme-dns-config:
+    # image рядом с build — это выбор, а не дубль: docker compose pull
+    # заберёт готовый образ из GHCR, а без него compose соберёт его сам
+    # из исходников рядом. Тег закрепляется в .env: LEAUTH_TAG=vX.Y.Z.
+    image: ghcr.io/wendor/leauth:${LEAUTH_TAG:-latest}
+    build:
+      context: ../..
+    command:
+      - render
+      - -in=/templates/acme-dns.cfg.tmpl
+      - -out=/config/config.cfg
+    environment:
+      ACMEDNS_ZONE: ${ACMEDNS_ZONE:?делегированная зона, например acme.example.com}
+      ACMEDNS_NS_HOST: ${ACMEDNS_NS_HOST:?имя NS-сервера, например ns-acme.example.com}
+      ACMEDNS_ADMIN: ${ACMEDNS_ADMIN:?почта админа зоны в форме SOA, например admin.example.com}
+      ACMEDNS_PUBLIC_IP: ${ACMEDNS_PUBLIC_IP:?публичный IP этого хоста}
+      ACMEDNS_LISTEN: ${ACMEDNS_LISTEN:-0.0.0.0:53}
+    volumes:
+      - ./acme-dns.cfg.tmpl:/templates/acme-dns.cfg.tmpl:ro
+      - acme-dns-config:/config
+
+  acme-dns:
+    image: joohoi/acme-dns:latest
+    restart: unless-stopped
+    ports:
+      # DNS должен быть доступен из интернета — сюда ходит Let's Encrypt.
+      # По умолчанию слушаются все адреса. На хосте с systemd-resolved
+      # это не сработает: его stub-listener уже держит 127.0.0.53:53, а
+      # привязка ко всем адресам с ним конфликтует. Тогда в
+      # ACMEDNS_BIND_IP ставится публичный адрес хоста.
+      - "${ACMEDNS_BIND_IP:-0.0.0.0}:53:53/udp"
+      - "${ACMEDNS_BIND_IP:-0.0.0.0}:53:53/tcp"
+    volumes:
+      - acme-dns-config:/etc/acme-dns:ro
+      - acme-dns-data:/var/lib/acme-dns
+    depends_on:
+      acme-dns-config:
+        condition: service_completed_successfully
+    networks:
+      - leauth
+    # Порт 8081 наружу не публикуется: REST API доступен только центру.
+
+  leauth:
+    image: ghcr.io/wendor/leauth:${LEAUTH_TAG:-latest}
+    build:
+      context: ../..
+    restart: unless-stopped
+    command: ["server"]
+    # .env уезжает в контейнер целиком: необязательные настройки центра
+    # (PRECHECK_RESOLVER, RENEW_BEFORE, ADMIN_USER и прочие) задаются в нём
+    # и работают без правки этого файла. Перечисление ниже — только для
+    # обязательных: compose обязан остановиться, если их забыли.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LEAUTH_MASTER_KEY: ${LEAUTH_MASTER_KEY:?нужен мастер-ключ, 64 hex-символа}
+      LEAUTH_ENROLL_TOKEN: ${LEAUTH_ENROLL_TOKEN:?нужен общий токен приёма прокси}
+      ACME_EMAIL: ${ACME_EMAIL:?почта для уведомлений Let's Encrypt}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?пароль к странице статуса}
+      # Обкатка на тестовом Let's Encrypt — лимиты там мягче:
+      # ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory
+      ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+    volumes:
+      - leauth-data:/data
+    ports:
+      # API отдаёт приватные ключи сертификатов и токены прокси, поэтому
+      # публиковать его в открытый интернет не стоит. Когда центр закрыт
+      # TLS — своим же прокси или чужим фронтом на том же хосте — в
+      # LEAUTH_BIND_IP ставится 127.0.0.1, и порт остаётся виден только
+      # с хоста. См. «API центра под TLS» в README.
+      - "${LEAUTH_BIND_IP:-0.0.0.0}:8080:8080"
+    depends_on:
+      - acme-dns
+    networks:
+      - leauth
+
+volumes:
+  acme-dns-config:
+  acme-dns-data:
+  leauth-data:
+
+networks:
+  leauth:

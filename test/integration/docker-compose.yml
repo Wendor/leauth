@@ -1,0 +1,63 @@
+services:
+  acme-dns:
+    image: joohoi/acme-dns:latest
+    ports:
+      - "127.0.0.1:5354:53/udp"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ./acme-dns.cfg:/etc/acme-dns/config.cfg:ro
+
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    # DNS-стаб живёт в самом тесте, на хосте.
+    command: -config /test/config/pebble-config.json -dnsserver host.docker.internal:5355
+    environment:
+      # Убирает случайные задержки валидации — тест и так небыстрый.
+      PEBBLE_VA_NOSLEEP: "1"
+    ports:
+      - "127.0.0.1:14000:14000"
+      - "127.0.0.1:15000:15000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  backend:
+    image: traefik/whoami:latest
+
+  leauth-server:
+    build:
+      context: ../..
+    command: ["server"]
+    environment:
+      LEAUTH_MASTER_KEY: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      LEAUTH_ENROLL_TOKEN: "e2e-токен-приёма"
+      LEAUTH_DB: /tmp/leauth.db
+      ACME_DIRECTORY: https://pebble:14000/dir
+      ACME_EMAIL: e2e@example.com
+      # DNS-стаб живёт в тесте, на хосте.
+      PRECHECK_RESOLVER: host.docker.internal:5355
+      CHECK_INTERVAL: 5s
+      # Корневой сертификат pebble, иначе lego ему не доверится.
+      LEGO_CA_CERTIFICATES: /certs/pebble.minica.pem
+    volumes:
+      - ./pebble.minica.pem:/certs/pebble.minica.pem:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - acme-dns
+      - pebble
+
+  leauth-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/proxy/Dockerfile
+    environment:
+      LEAUTH_ENROLL_TOKEN: "e2e-токен-приёма"
+    volumes:
+      - ./agent.yaml:/etc/leauth/agent.yaml:ro
+    ports:
+      - "127.0.0.1:8443:8443"
+    depends_on:
+      - leauth-server
+      - backend
