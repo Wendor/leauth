@@ -12,7 +12,9 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 # Готовый бинарь авторизации: своего кода OAuth не пишем.
 FROM quay.io/oauth2-proxy/oauth2-proxy:v7.15.3 AS oauth2
 
-FROM nginx:1.29-alpine
+# Не ниже 1.30.7: в ней закрыты CVE-2026-123007, -123633, -123634,
+# -121810, -113425 (NGINX2Root) и CVE-2026-118899.
+FROM nginx:1.30.7-alpine
 LABEL org.opencontainers.image.source=https://github.com/Wendor/leauth
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/leauth /usr/local/bin/leauth
